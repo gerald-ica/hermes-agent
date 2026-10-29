@@ -426,7 +426,8 @@ def served_profile_child_env(
     overlay cannot remove it. ``inherit_credentials=True`` is for children that legitimately run with
     the profile's credentials (they run the agent or mint its token): the target profile's own secrets
     (its ``.env`` + hydrated sources, what a standalone ``hermes -p X`` loads itself) are overlaid — never
-    a sibling profile's. Under multiplex with neither a target nor a bound scope the call raises
+    a sibling profile's. In a strict context the agent-infra names are not overlaid either (WEA-2773). Under
+    multiplex with neither a target nor a bound scope the call raises
     (``get_secret``'s fail-closed contract): minting with the launch environ would sign in as the wrong
     profile. ``False`` keeps the provider scrub; the caller re-adds the few keys the child needs via
     ``get_secret``. ``target_home`` defaults to the active override; ``base`` replaces the
@@ -452,7 +453,10 @@ def served_profile_child_env(
                     "", "served_profile_child_env(inherit_credentials=True) called with no target home and "
                     "no profile secret scope bound while multiplexing is on; the child would inherit the "
                     "launch profile's credentials. Bind the profile scope (or pass target_home) at the spawn site.")
-        env.update((k, v) for k, v in (secrets or {}).items() if v is not None)
+        # The overlay re-adds the profile's .env names after the strict scrub, so the agent-infra denylist
+        # applies here too (WEA-2773): a strict child must not get a credential back from its own .env.
+        env.update((k, v) for k, v in (secrets or {}).items()
+                   if v is not None and not _is_agent_infra_credential(k))
     return env
 
 
