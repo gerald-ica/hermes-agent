@@ -141,7 +141,9 @@ in-process component is operator review before install (§2.4,
 process and from the agent's own shell, including
 `inherit_credentials=True` spawns. A context is strict when it is a
 dispatcher-owned kanban worker (`HERMES_KANBAN_TASK`), a cron run
-(`HERMES_CRON_SESSION`), or a profile whose `config.yaml` sets
+(`HERMES_CRON_SESSION`), a descendant of either (`HERMES_DELEGATED_CHILD_CONTEXT`,
+which every spawn under a strict context carries, so strictness passes down
+every level of children), or a profile whose `config.yaml` sets
 `strict_child_env: true`. For a child that acts for a served profile
 (`served_profile_child_env`), the profile is the target, and its own
 `config.yaml` decides the last condition, not the launch profile's.

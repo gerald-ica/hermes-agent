@@ -205,12 +205,17 @@ def served_child_env_home(home):
 
 def _strict_child_env_context() -> bool:
     """True where the agent-infra credentials are stripped: a dispatcher-owned kanban worker
-    (``HERMES_KANBAN_TASK``; the repo-health bots run as workers), a cron run, or a profile whose
-    config sets ``strict_child_env: true``. The profile is the served target when one is bound
+    (``HERMES_KANBAN_TASK``; the repo-health bots run as workers), a cron run, a descendant of either
+    (``HERMES_DELEGATED_CHILD_CONTEXT``, which every spawn under a strict context carries, see
+    ``agent.delegation_context.delegated_child_subprocess_env``), or a profile whose config sets
+    ``strict_child_env: true``. The profile is the served target when one is bound
     (``served_child_env_home``), else the launch profile. Interactive owner sessions match none of these
-    and keep today's environment. A kanban or cron marker always counts. A config read failure counts as
-    not strict, so an unreadable config leaves an owner session as it was."""
+    and keep today's environment. The kanban, cron and delegated markers always count. A config read
+    failure counts as not strict, so an unreadable config leaves an owner session as it was."""
     if (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return True
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
+    if (os.environ.get(DELEGATED_CHILD_ENV_MARKER) or "").strip():
         return True
     try:
         from gateway.session_context import get_session_env

@@ -177,8 +177,13 @@ def delegated_child_subprocess_env(
 
     Location and credentials are untouched; callers retain their existing secret policy.
     Dispatcher workers and supervised tool transports grant their own explicit scope.
+
+    A spawn made under a strict child context (kanban worker, cron run, strict profile; WEA-2773)
+    carries the marker too, so the child stays strict for its own spawns, however many levels down.
     """
+    from tools.environments.local_env_policy import _strict_child_env_context
     if not (is_delegated_child_process_context() or os.environ.get("HERMES_KANBAN_TASK")
-            or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
+            or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))
+            or _strict_child_env_context()):
         return None if env is None else dict(env)
     return scrub_kanban_env(os.environ if env is None else env)

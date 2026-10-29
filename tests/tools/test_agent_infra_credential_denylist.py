@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER, delegated_child_context
 from tools.env_passthrough import clear_env_passthrough, is_env_passthrough, register_env_passthrough
 from tools.environments.local import (
     _make_run_env, build_subprocess_env, hermes_subprocess_env, served_profile_child_env)
@@ -38,6 +39,7 @@ STRICT_CONTEXTS = [
     pytest.param({"HERMES_KANBAN_TASK": "t_fake"}, {}, id="kanban-worker"),
     pytest.param({"HERMES_CRON_SESSION": "1"}, {}, id="cron"),
     pytest.param({}, {"strict_child_env": True}, id="strict-config"),
+    pytest.param({DELEGATED_CHILD_ENV_MARKER: "/fake/kanban-root"}, {}, id="delegated-child-process"),
 ]
 
 # The agent-infra names a profile .env can carry into the overlay (the strict-context denylist).
@@ -182,3 +184,70 @@ def test_strict_overlay_blocks_tier1_github_names_and_provider_keys(tmp_path):
     leaked = sorted(name for name in GITHUB_AND_PROVIDER_ENV_IN_PROFILE_DOTENV if name in env)
     assert not leaked, f"profile overlay leaked {leaked}"
     assert env["REPO_HEALTH_TARGET"] == "etch"
+
+
+@pytest.mark.parametrize(("extra", "cfg"), STRICT_CONTEXTS)
+def test_strict_context_marks_its_children_so_strictness_is_inherited(extra, cfg):
+    env = _spawn_envs(extra, cfg)["hermes_subprocess_env(inherit=True)"]
+    assert env.get(DELEGATED_CHILD_ENV_MARKER), "a child of a strict context carries no inheritance marker"
+
+
+def test_interactive_session_child_env_carries_no_inheritance_marker():
+    for path, env in _spawn_envs({}, {}).items():
+        assert DELEGATED_CHILD_ENV_MARKER not in env, path
+
+
+def test_delegated_child_process_keeps_infra_credentials_out_of_the_profile_overlay(tmp_path):
+    # A delegated child process has the marker but no kanban identity. Its overlay must still be strict.
+    home = _profile_home(tmp_path)
+    with patch.dict(os.environ, _loaded_env({DELEGATED_CHILD_ENV_MARKER: "/fake/kanban-root"}), clear=True), \
+            patch("hermes_cli.config.load_config", return_value={}):
+        env = served_profile_child_env(target_home=home, inherit_credentials=True)
+    leaked = sorted(name for name in INFRA_ENV_IN_PROFILE_DOTENV if name in env)
+    assert not leaked, f"delegated child profile overlay leaked {leaked}"
+    assert env["REPO_HEALTH_TARGET"] == "etch"
+
+
+BOT_AND_GITHUB_ENV = ("LINEAR_API_KEY", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+
+
+def test_kanban_worker_delegated_child_and_grandchild_get_no_bot_credentials(tmp_path):
+    # The served profile's own .env names the bot and GitHub credentials, so every overlay has them to re-admit.
+    home = tmp_path / "bot-profile"
+    home.mkdir()
+    lines = [f"{name}=profile-{name.lower()}-value" for name in BOT_AND_GITHUB_ENV]
+    (home / ".env").write_text("\n".join(lines) + "\n")
+
+    def leaked(env):
+        return sorted(name for name in BOT_AND_GITHUB_ENV if name in env)
+
+    with patch("hermes_cli.config.load_config", return_value={}):
+        # 1. The kanban worker itself.
+        with patch.dict(os.environ, _loaded_env({"HERMES_KANBAN_TASK": "t_fake"}), clear=True):
+            worker = served_profile_child_env(target_home=home, inherit_credentials=True)
+            child = hermes_subprocess_env(inherit_credentials=True)
+            with delegated_child_context():  # 2a. the in-process delegated child
+                in_process_child = served_profile_child_env(target_home=home, inherit_credentials=True)
+        assert not leaked(worker), f"kanban worker leaked {leaked(worker)}"
+        assert not leaked(in_process_child), f"in-process delegated child leaked {leaked(in_process_child)}"
+        # The spawned delegated child process carries the marker and no kanban identity.
+        assert child.get(DELEGATED_CHILD_ENV_MARKER)
+        assert "HERMES_KANBAN_TASK" not in child
+        assert not leaked(child), f"delegated child env leaked {leaked(child)}"
+
+        # 2b. The delegated child process: its own overlay and shell, and the env it gives a grandchild.
+        with patch.dict(os.environ, child, clear=True):
+            child_overlay = served_profile_child_env(target_home=home, inherit_credentials=True)
+            child_shell = _make_run_env({})
+            grandchild = hermes_subprocess_env(inherit_credentials=True)
+        assert not leaked(child_overlay), f"delegated child overlay leaked {leaked(child_overlay)}"
+        assert not leaked(child_shell), f"delegated child shell leaked {leaked(child_shell)}"
+        assert grandchild.get(DELEGATED_CHILD_ENV_MARKER)
+        assert not leaked(grandchild), f"grandchild env leaked {leaked(grandchild)}"
+
+        # 3. The grandchild process: its overlay and shell.
+        with patch.dict(os.environ, grandchild, clear=True):
+            grandchild_overlay = served_profile_child_env(target_home=home, inherit_credentials=True)
+            grandchild_shell = _make_run_env({})
+        assert not leaked(grandchild_overlay), f"grandchild overlay leaked {leaked(grandchild_overlay)}"
+        assert not leaked(grandchild_shell), f"grandchild shell leaked {leaked(grandchild_shell)}"
