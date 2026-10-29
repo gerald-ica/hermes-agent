@@ -134,6 +134,32 @@ in-memory credentials. The mitigation against a compromised
 in-process component is operator review before install (§2.4,
 §2.5), not environment scrubbing.
 
+**Strict child env.** In a strict context, the agent-infra credentials
+`OP_SERVICE_ACCOUNT_TOKEN`, `OP_CONNECT_TOKEN`, `BWS_ACCESS_TOKEN`,
+`MORPH_API_KEY`, `ARENA_MCP_TOKEN`, `LINEAR_API_KEY`, `LINEAR_TOKEN`,
+`GITHUB_PAT_TOKEN` and `SUDO_PASSWORD` are stripped from every child
+process and from the agent's own shell, including
+`inherit_credentials=True` spawns. A context is strict when it is a
+dispatcher-owned kanban worker (`HERMES_KANBAN_TASK`), a cron run
+(`HERMES_CRON_SESSION`), or a profile whose `config.yaml` sets
+`strict_child_env: true`. Interactive owner sessions keep today's
+environment. The 1Password and Bitwarden secret sources are not
+affected: they spawn their CLIs unscrubbed and set their own token.
+The list lives in `tools/environments/local_env_policy.py`
+(`_AGENT_INFRA_CREDENTIAL_ENV`).
+
+**Same-UID limitation.** The scrub changes the environment a child is
+given. It does not hide the parent's environment. A child running as
+the same user can read its parent's `/proc/$PPID/environ`, and the
+Hermes process holds the resolved secrets in `os.environ`, so a
+command the agent runs can read them through its parent. The scrub is
+defence in depth: it stops accidental and casual disclosure through
+child processes. It is not a boundary against a hostile command. The
+real boundary is the Docker terminal backend (with the iron-proxy
+setup), which runs the agent's commands outside the Hermes process
+and its environment. Moving the bot profiles onto that backend is an
+owner phase-2 item.
+
 ### 2.4 In-Process Heuristics
 
 The following components screen or warn about LLM behavior. They

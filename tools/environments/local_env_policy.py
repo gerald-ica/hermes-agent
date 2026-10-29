@@ -16,13 +16,14 @@ _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 # blocklisted name (GHSA-rhgp-j443-p4rf), so blocking it would be unrecoverable.
 _AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({"AWS_BEARER_TOKEN_BEDROCK"})
 
-# Bot and agent-infra credentials no agent child needs (WEA-2773). Tier 1 (``_ALWAYS_STRIP_KEYS``)
-# strips them from every non-terminal child, even with inherit_credentials=True. The local terminal
-# (the agent's shell) consults only the provider blocklist, so they are unioned into it too. Blocked
-# names cannot be re-admitted by env_passthrough.
+# Bot and agent-infra credentials no agent child needs (WEA-2773). In a strict context (see
+# ``_strict_child_env_context``) they are stripped from every child, including the agent's own shell
+# and inherit_credentials=True spawns. Interactive owner sessions keep today's environment. Blocked
+# names cannot be re-admitted by env_passthrough while the context is strict. The 1Password and
+# Bitwarden secret sources spawn their CLIs with scrub_secrets=False, so the strip never reaches them.
 _AGENT_INFRA_CREDENTIAL_ENV = frozenset({
-    "OP_SERVICE_ACCOUNT_TOKEN", "MORPH_API_KEY", "ARENA_MCP_TOKEN", "LINEAR_API_KEY",
-    "LINEAR_TOKEN", "GITHUB_PAT_TOKEN", "SUDO_PASSWORD",
+    "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "BWS_ACCESS_TOKEN", "MORPH_API_KEY",
+    "ARENA_MCP_TOKEN", "LINEAR_API_KEY", "LINEAR_TOKEN", "GITHUB_PAT_TOKEN", "SUDO_PASSWORD",
 })
 
 _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
@@ -58,7 +59,7 @@ _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "HERMES_ANON_API_SECRET", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
     "HERMES_DASHBOARD_BASIC_AUTH_SECRET", "HERMES_DASHBOARD_DRAIN_SECRET",
     "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "HERMES_MEET_REALTIME_KEY",
-}) | _AGENT_INFRA_CREDENTIAL_ENV
+})
 
 
 def _left_core_env(*, secrets_only: bool) -> frozenset:
@@ -183,6 +184,36 @@ def _registered_adapter_secret_env() -> frozenset:
     return _registry_adapter_secret_env() | _home_adapter_secret_env()
 
 
+def _strict_child_env_context() -> bool:
+    """True where the agent-infra credentials are stripped: a dispatcher-owned kanban worker
+    (``HERMES_KANBAN_TASK``; the repo-health bots run as workers), a cron run, or a profile whose
+    config sets ``strict_child_env: true``. Interactive owner sessions match none of these and keep
+    today's environment. A kanban or cron marker always counts. A config read failure counts as not
+    strict, so an unreadable config leaves an owner session as it was."""
+    if (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return True
+    try:
+        from gateway.session_context import get_session_env
+
+        if str(get_session_env("HERMES_CRON_SESSION", "") or "").strip():
+            return True
+    except Exception:
+        pass
+    try:
+        from hermes_cli.config import load_config
+        from utils import is_truthy_value
+
+        return is_truthy_value((load_config() or {}).get("strict_child_env"))
+    except Exception:
+        return False
+
+
+def _is_agent_infra_credential(name: str) -> bool:
+    """``name`` is an agent-infra credential (``_AGENT_INFRA_CREDENTIAL_ENV``) and this context is
+    strict. Checks the name first, so the config is read only for those few names."""
+    return name.upper() in _AGENT_INFRA_CREDENTIAL_ENV and _strict_child_env_context()
+
+
 def _is_provider_env_blocklisted(name: str, _registered: frozenset | None = None) -> bool:
     """``name`` is a blocklisted provider/tool credential or adapter secret, matched the way the
     platform's environment resolves names: exact plus case-folded. On Windows the environment
@@ -191,6 +222,8 @@ def _is_provider_env_blocklisted(name: str, _registered: frozenset | None = None
     ``_registered`` so the registry is read once per env, not once per key."""
     upper = name.upper()
     if name in _HERMES_PROVIDER_ENV_BLOCKLIST or upper in _HERMES_PROVIDER_ENV_BLOCKLIST:
+        return True
+    if _is_agent_infra_credential(upper):
         return True
     return upper in (_registered_adapter_secret_env() if _registered is None else _registered)
 
@@ -403,5 +436,5 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "HERMES_DASHBOARD_DRAIN_SECRET",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY",
-}) | _ADAPTER_SECRET_ENV | _left_core_env(secrets_only=True) | _AGENT_INFRA_CREDENTIAL_ENV  # every declared adapter secret is Tier 1, like the bot tokens above
+}) | _ADAPTER_SECRET_ENV | _left_core_env(secrets_only=True)  # every declared adapter secret is Tier 1
 _ALWAYS_STRIP_FOLDED: frozenset[str] = frozenset(k.upper() for k in _ALWAYS_STRIP_KEYS)
