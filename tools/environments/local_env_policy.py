@@ -16,6 +16,15 @@ _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 # blocklisted name (GHSA-rhgp-j443-p4rf), so blocking it would be unrecoverable.
 _AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({"AWS_BEARER_TOKEN_BEDROCK"})
 
+# Bot and agent-infra credentials no agent child needs (WEA-2773). Tier 1 (``_ALWAYS_STRIP_KEYS``)
+# strips them from every non-terminal child, even with inherit_credentials=True. The local terminal
+# (the agent's shell) consults only the provider blocklist, so they are unioned into it too. Blocked
+# names cannot be re-admitted by env_passthrough.
+_AGENT_INFRA_CREDENTIAL_ENV = frozenset({
+    "OP_SERVICE_ACCOUNT_TOKEN", "MORPH_API_KEY", "ARENA_MCP_TOKEN", "LINEAR_API_KEY",
+    "LINEAR_TOKEN", "GITHUB_PAT_TOKEN", "SUDO_PASSWORD",
+})
+
 _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_ORG_ID",
     "OPENAI_ORGANIZATION", "OPENROUTER_API_KEY", "ANTHROPIC_BASE_URL",
@@ -49,7 +58,7 @@ _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "HERMES_ANON_API_SECRET", "HERMES_DASHBOARD_BASIC_AUTH_PASSWORD",
     "HERMES_DASHBOARD_BASIC_AUTH_SECRET", "HERMES_DASHBOARD_DRAIN_SECRET",
     "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "HERMES_MEET_REALTIME_KEY",
-})
+}) | _AGENT_INFRA_CREDENTIAL_ENV
 
 
 def _left_core_env(*, secrets_only: bool) -> frozenset:
@@ -394,5 +403,5 @@ _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     "HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "HERMES_DASHBOARD_DRAIN_SECRET",
     # Remote-compute / infrastructure secrets
     "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "DAYTONA_API_KEY",
-}) | _ADAPTER_SECRET_ENV | _left_core_env(secrets_only=True)  # every declared adapter secret is Tier 1
+}) | _ADAPTER_SECRET_ENV | _left_core_env(secrets_only=True) | _AGENT_INFRA_CREDENTIAL_ENV  # every declared adapter secret is Tier 1, like the bot tokens above
 _ALWAYS_STRIP_FOLDED: frozenset[str] = frozenset(k.upper() for k in _ALWAYS_STRIP_KEYS)
