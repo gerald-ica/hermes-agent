@@ -20,7 +20,8 @@ from unittest.mock import patch
 import pytest
 
 from tools.env_passthrough import clear_env_passthrough, is_env_passthrough, register_env_passthrough
-from tools.environments.local import _make_run_env, build_subprocess_env, hermes_subprocess_env
+from tools.environments.local import (
+    _make_run_env, build_subprocess_env, hermes_subprocess_env, served_profile_child_env)
 
 BOT_CREDENTIAL_ENV = (
     "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "BWS_ACCESS_TOKEN", "MORPH_API_KEY",
@@ -38,6 +39,12 @@ STRICT_CONTEXTS = [
     pytest.param({"HERMES_CRON_SESSION": "1"}, {}, id="cron"),
     pytest.param({}, {"strict_child_env": True}, id="strict-config"),
 ]
+
+# The agent-infra names a profile .env can carry into the overlay (the strict-context denylist).
+INFRA_ENV_IN_PROFILE_DOTENV = (
+    "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "BWS_ACCESS_TOKEN", "MORPH_API_KEY",
+    "ARENA_MCP_TOKEN", "LINEAR_API_KEY", "LINEAR_TOKEN", "GITHUB_PAT_TOKEN", "SUDO_PASSWORD",
+)
 
 _BASE_ENV = {"PATH": "/usr/bin:/bin", "HOME": "/home/user", "USER": "testuser"}
 
@@ -100,3 +107,34 @@ def test_strict_context_refuses_a_passthrough_registered_earlier():
             assert "OP_CONNECT_TOKEN" not in _make_run_env({})
     finally:
         clear_env_passthrough()
+
+
+def _profile_home(tmp_path):
+    """A served profile whose ``.env`` names every agent-infra credential plus one ordinary name."""
+    home = tmp_path / "profile"
+    home.mkdir()
+    lines = [f"{name}=profile-{name.lower()}-value" for name in INFRA_ENV_IN_PROFILE_DOTENV]
+    lines.append("REPO_HEALTH_TARGET=etch")
+    (home / ".env").write_text("\n".join(lines) + "\n")
+    return home
+
+
+def test_strict_context_keeps_infra_credentials_out_of_the_profile_overlay(tmp_path):
+    # inherit_credentials=True overlays the target profile's own .env on top of the scrubbed base.
+    # The overlay must not re-admit an agent-infra name in a strict context.
+    home = _profile_home(tmp_path)
+    with patch.dict(os.environ, _loaded_env({"HERMES_KANBAN_TASK": "t_fake"}), clear=True), \
+            patch("hermes_cli.config.load_config", return_value={}):
+        env = served_profile_child_env(target_home=home, inherit_credentials=True)
+    leaked = sorted(name for name in INFRA_ENV_IN_PROFILE_DOTENV if name in env)
+    assert not leaked, f"profile overlay leaked {leaked}"
+    assert env["REPO_HEALTH_TARGET"] == "etch"
+
+
+def test_interactive_session_keeps_the_profile_overlay_as_before(tmp_path):
+    home = _profile_home(tmp_path)
+    with patch.dict(os.environ, _loaded_env({}), clear=True), \
+            patch("hermes_cli.config.load_config", return_value={}):
+        env = served_profile_child_env(target_home=home, inherit_credentials=True)
+    assert env["LINEAR_API_KEY"] == "profile-linear_api_key-value"
+    assert env["REPO_HEALTH_TARGET"] == "etch"
