@@ -166,6 +166,7 @@ _PREFIX_PATTERNS = [
     r"fal_[A-Za-z0-9_-]{10,}",          # Fal.ai
     r"fc-[A-Za-z0-9]{10,}",             # Firecrawl
     r"bb_live_[A-Za-z0-9_-]{10,}",      # BrowserBase
+    r"ops_[A-Za-z0-9_-]{20,}",          # 1Password service account token (WEA-2773)
     r"gAAAA[A-Za-z0-9_=-]{20,}",        # Codex encrypted tokens
     r"AKIA[A-Z0-9]{16}",                # AWS Access Key ID
     r"sk_live_[A-Za-z0-9]{10,}",        # Stripe secret key (live)
