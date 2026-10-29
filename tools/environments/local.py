@@ -24,8 +24,8 @@ from tools.environments.local_env_policy import (  # noqa: F401 — _HERMES_PROV
     _ALWAYS_STRIP_FOLDED, _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
     _is_agent_infra_credential, _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
     _home_adapter_secret_env, _matches_terminal_first_party_prefix, _plugin_terminal_env_strip_keys,
-    _registered_adapter_secret_env, _registry_adapter_secret_env,
-    strip_profile_gate_env)
+    _registered_adapter_secret_env, _registry_adapter_secret_env, _strict_child_env_context,
+    served_child_env_home, strip_profile_gate_env)
 from tools.environments.local_pythonpath import (
     _build_hermes_repo_root_aliases, _strip_hermes_owned_pythonpath_and_runtime_markers)
 
@@ -331,13 +331,18 @@ def hermes_subprocess_env(
     return _finalize_child_env(env)
 
 
+def _tier1_strip_folded() -> frozenset:
+    """Folded names every child loses: Tier 1, the plugin terminal strip keys and the bound profile's adapter
+    secrets. The base scrub and the strict profile overlay both use this, so the two lists cannot drift."""
+    return _ALWAYS_STRIP_FOLDED | {k.upper() for k in _plugin_terminal_env_strip_keys()} | _home_adapter_secret_env()
+
+
 def _scrub_credentials(env: dict, *, inherit_credentials: bool) -> dict:
     """Tier 1 (always) and, unless ``inherit_credentials``, Tier 2 provider/tool credentials, in place."""
     # Credential names fold to uppercase for membership: on Windows the env block
     # itself is case-insensitive, so a lowercase-stored ``gh_token`` IS GH_TOKEN.
-    home_secrets = _home_adapter_secret_env()  # one manifest stamp per scrub
-    strip_folded = _ALWAYS_STRIP_FOLDED | {k.upper() for k in _plugin_terminal_env_strip_keys()} | home_secrets
-    registered = _registry_adapter_secret_env()  # home_secrets already strip above
+    strip_folded = _tier1_strip_folded()  # one manifest stamp per scrub
+    registered = _registry_adapter_secret_env()  # the Tier-1 set already strips the home adapter secrets
     for key in list(env):
         if (key.upper() in strip_folded
                 or _is_agent_infra_credential(key)  # strict context only; holds even with inherit_credentials
@@ -387,17 +392,25 @@ def served_profile_child_env(
     overlay cannot remove it. ``inherit_credentials=True`` is for children that legitimately run with
     the profile's credentials (they run the agent or mint its token): the target profile's own secrets
     (its ``.env`` + hydrated sources, what a standalone ``hermes -p X`` loads itself) are overlaid — never
-    a sibling profile's. In a strict context the agent-infra names are not overlaid either (WEA-2773). Under
-    multiplex with neither a target nor a bound scope the call raises
+    a sibling profile's. In a strict context (the target profile's own ``strict_child_env``, see
+    ``served_child_env_home``) the overlay also skips the Tier-1 names and the provider blocklist the base
+    scrub strips (WEA-2773). Under multiplex with neither a target nor a bound scope the call raises
     (``get_secret``'s fail-closed contract): minting with the launch environ would sign in as the wrong
     profile. ``False`` keeps the provider scrub; the caller re-adds the few keys the child needs via
     ``get_secret``. ``target_home`` defaults to the active override; ``base`` replaces the
     ``hermes_subprocess_env`` snapshot."""
+    from hermes_constants import get_hermes_home_override
+    target = str(target_home or get_hermes_home_override() or "")
+    # One binding for the whole build: the base scrub, the routed scrub and the overlay all read the target's config.
+    with served_child_env_home(target or None):
+        return _served_profile_child_env(base, target, inherit_credentials)
+
+
+def _served_profile_child_env(base, target, inherit_credentials):
     from agent.secret_scope import (
         UnscopedSecretError, build_profile_secret_scope, current_secret_scope, is_multiplex_active)
-    from hermes_constants import apply_scratch_tmp_env, get_hermes_home_override
+    from hermes_constants import apply_scratch_tmp_env
     env = dict(base) if base is not None else hermes_subprocess_env(inherit_credentials=inherit_credentials)
-    target = str(target_home or get_hermes_home_override() or "")
     if target:
         env["HERMES_HOME"] = target
         apply_scratch_tmp_env(env)  # TMPDIR follows the served home, like HOME does
@@ -414,10 +427,16 @@ def served_profile_child_env(
                     "", "served_profile_child_env(inherit_credentials=True) called with no target home and "
                     "no profile secret scope bound while multiplexing is on; the child would inherit the "
                     "launch profile's credentials. Bind the profile scope (or pass target_home) at the spawn site.")
-        # The overlay re-adds the profile's .env names after the strict scrub, so the agent-infra denylist
-        # applies here too (WEA-2773): a strict child must not get a credential back from its own .env.
-        env.update((k, v) for k, v in (secrets or {}).items()
-                   if v is not None and not _is_agent_infra_credential(k))
+        # The overlay re-adds the profile's .env names after the base scrub. In a strict context it must not
+        # re-admit anything the scrub strips: the Tier-1 names (GitHub tokens included), the agent-infra names,
+        # or the provider blocklist (WEA-2773).
+        overlay = {k: v for k, v in (secrets or {}).items() if v is not None}
+        if _strict_child_env_context():
+            denied = _tier1_strip_folded()
+            registered = _registry_adapter_secret_env()
+            overlay = {k: v for k, v in overlay.items()
+                       if k.upper() not in denied and not _is_provider_env_blocklisted(k, registered)}
+        env.update(overlay)
     return env
 
 

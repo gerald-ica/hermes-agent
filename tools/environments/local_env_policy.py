@@ -2,8 +2,11 @@
 names are Hermes-managed credentials. The env *builders* applying it (``_make_run_env``,
 ``_sanitize_subprocess_env``, ``hermes_subprocess_env``) live in ``tools.environments.local``."""
 
+import contextlib
 import functools
 import os
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Optional
 
 # Prefix a caller uses in ``extra_env`` to force a blocklisted var through.
@@ -172,12 +175,29 @@ def _registered_adapter_secret_env() -> frozenset:
     return _registry_adapter_secret_env() | _home_adapter_secret_env()
 
 
+# The profile home of the served child whose env is being built (``served_profile_child_env``). While it is
+# bound, strictness reads that profile's own config.yaml, not the launch profile's (WEA-2773). A ContextVar, so a
+# spawn in another thread or task keeps its own binding.
+_SERVED_CHILD_ENV_HOME = ContextVar("_SERVED_CHILD_ENV_HOME", default=None)
+
+
+@contextlib.contextmanager
+def served_child_env_home(home):
+    """Bind the profile home whose ``strict_child_env`` decides the strictness of a served child's env."""
+    token = _SERVED_CHILD_ENV_HOME.set(Path(home) if home else None)
+    try:
+        yield
+    finally:
+        _SERVED_CHILD_ENV_HOME.reset(token)
+
+
 def _strict_child_env_context() -> bool:
     """True where the agent-infra credentials are stripped: a dispatcher-owned kanban worker
     (``HERMES_KANBAN_TASK``; the repo-health bots run as workers), a cron run, or a profile whose
-    config sets ``strict_child_env: true``. Interactive owner sessions match none of these and keep
-    today's environment. A kanban or cron marker always counts. A config read failure counts as not
-    strict, so an unreadable config leaves an owner session as it was."""
+    config sets ``strict_child_env: true``. The profile is the served target when one is bound
+    (``served_child_env_home``), else the launch profile. Interactive owner sessions match none of these
+    and keep today's environment. A kanban or cron marker always counts. A config read failure counts as
+    not strict, so an unreadable config leaves an owner session as it was."""
     if (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
         return True
     try:
@@ -188,10 +208,18 @@ def _strict_child_env_context() -> bool:
     except Exception:
         pass
     try:
-        from hermes_cli.config import load_config
         from utils import is_truthy_value
 
-        return is_truthy_value((load_config() or {}).get("strict_child_env"))
+        served_home = _SERVED_CHILD_ENV_HOME.get()
+        if served_home is not None:
+            from hermes_cli.config import read_user_config_raw
+
+            config = read_user_config_raw(served_home / "config.yaml")
+        else:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        return is_truthy_value((config or {}).get("strict_child_env"))
     except Exception:
         return False
 
@@ -406,9 +434,9 @@ def _plugin_terminal_env_strip_keys() -> frozenset:
 # (claude/codex/gemini). Not provider credentials — no child needs them and they are the
 # highest-value secrets to keep from a compromised dependency. Provider keys = Tier 2.
 _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
-    # GitHub auth
-    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
-    "GITHUB_APP_INSTALLATION_ID",
+    # GitHub auth. The enterprise and PAT names are GitHub credentials like GH_TOKEN, so they are Tier 1 too.
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_PAT", "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_INSTALLATION_ID",
     # Gateway / messaging bot tokens and access control
     "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN",
     "SLACK_SIGNING_SECRET", "GATEWAY_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS",

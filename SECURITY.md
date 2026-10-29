@@ -142,11 +142,18 @@ process and from the agent's own shell, including
 `inherit_credentials=True` spawns. A context is strict when it is a
 dispatcher-owned kanban worker (`HERMES_KANBAN_TASK`), a cron run
 (`HERMES_CRON_SESSION`), or a profile whose `config.yaml` sets
-`strict_child_env: true`. Interactive owner sessions keep today's
-environment. The 1Password and Bitwarden secret sources are not
-affected: they spawn their CLIs unscrubbed and set their own token.
-The list lives in `tools/environments/local_env_policy.py`
-(`_AGENT_INFRA_CREDENTIAL_ENV`).
+`strict_child_env: true`. For a child that acts for a served profile
+(`served_profile_child_env`), the profile is the target, and its own
+`config.yaml` decides the last condition, not the launch profile's.
+Interactive owner sessions keep today's environment. The 1Password and
+Bitwarden secret sources are not affected: they spawn their CLIs
+unscrubbed and set their own token. The list lives in
+`tools/environments/local_env_policy.py` (`_AGENT_INFRA_CREDENTIAL_ENV`).
+
+In a strict context the profile's `.env` overlay (`inherit_credentials=True`)
+is held to the same strips: the Tier-1 names (GitHub tokens included,
+`GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_PAT`) and the
+provider blocklist are not re-admitted from the profile's `.env`.
 
 **Same-UID limitation.** The scrub changes the environment a child is
 given. It does not hide the parent's environment. A child running as

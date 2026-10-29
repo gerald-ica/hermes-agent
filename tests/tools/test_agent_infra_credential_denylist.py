@@ -138,3 +138,47 @@ def test_interactive_session_keeps_the_profile_overlay_as_before(tmp_path):
         env = served_profile_child_env(target_home=home, inherit_credentials=True)
     assert env["LINEAR_API_KEY"] == "profile-linear_api_key-value"
     assert env["REPO_HEALTH_TARGET"] == "etch"
+
+
+GITHUB_AND_PROVIDER_ENV_IN_PROFILE_DOTENV = (
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_PAT", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
+)
+
+
+def test_served_child_strictness_comes_from_the_target_profile(tmp_path):
+    # The launch profile is not strict. The target profile's own config.yaml is, so its agent-infra
+    # names must not come back from the target's .env.
+    home = _profile_home(tmp_path)
+    (home / "config.yaml").write_text("strict_child_env: true\n")
+    with patch.dict(os.environ, _loaded_env({}), clear=True), \
+            patch("hermes_cli.config.load_config", return_value={}):
+        env = served_profile_child_env(target_home=home, inherit_credentials=True)
+    leaked = sorted(name for name in INFRA_ENV_IN_PROFILE_DOTENV if name in env)
+    assert not leaked, f"a strict target profile leaked {leaked}"
+    assert env["REPO_HEALTH_TARGET"] == "etch"
+
+
+def test_strict_launch_config_does_not_strip_a_non_strict_target(tmp_path):
+    # The launch profile is strict and the target is not. The target's overlay keeps its names, as it
+    # does in an interactive session.
+    home = _profile_home(tmp_path)
+    with patch.dict(os.environ, _loaded_env({}), clear=True), \
+            patch("hermes_cli.config.load_config", return_value={"strict_child_env": True}):
+        env = served_profile_child_env(target_home=home, inherit_credentials=True)
+    assert env["LINEAR_API_KEY"] == "profile-linear_api_key-value"
+
+
+def test_strict_overlay_blocks_tier1_github_names_and_provider_keys(tmp_path):
+    # The overlay re-admits the profile's .env after the base scrub. In a strict context it must not
+    # re-admit the Tier-1 GitHub names or the provider blocklist the base scrub uses.
+    home = tmp_path / "profile"
+    home.mkdir()
+    lines = [f"{name}=profile-{name.lower()}-value" for name in GITHUB_AND_PROVIDER_ENV_IN_PROFILE_DOTENV]
+    lines.append("REPO_HEALTH_TARGET=etch")
+    (home / ".env").write_text("\n".join(lines) + "\n")
+    with patch.dict(os.environ, _loaded_env({"HERMES_KANBAN_TASK": "t_fake"}), clear=True), \
+            patch("hermes_cli.config.load_config", return_value={}):
+        env = served_profile_child_env(target_home=home, inherit_credentials=True)
+    leaked = sorted(name for name in GITHUB_AND_PROVIDER_ENV_IN_PROFILE_DOTENV if name in env)
+    assert not leaked, f"profile overlay leaked {leaked}"
+    assert env["REPO_HEALTH_TARGET"] == "etch"
