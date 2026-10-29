@@ -2,8 +2,11 @@
 names are Hermes-managed credentials. The env *builders* applying it (``_make_run_env``,
 ``_sanitize_subprocess_env``, ``hermes_subprocess_env``) live in ``tools.environments.local``."""
 
+import contextlib
 import functools
 import os
+from contextvars import ContextVar
+from pathlib import Path
 from typing import Optional
 
 # Prefix a caller uses in ``extra_env`` to force a blocklisted var through.
@@ -15,6 +18,16 @@ _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 # trusted operator shell (SECURITY.md §3.2) and env_passthrough can never re-allow a
 # blocklisted name (GHSA-rhgp-j443-p4rf), so blocking it would be unrecoverable.
 _AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({"AWS_BEARER_TOKEN_BEDROCK"})
+
+# Bot and agent-infra credentials no agent child needs (WEA-2773). In a strict context (see
+# ``_strict_child_env_context``) they are stripped from every child, including the agent's own shell
+# and inherit_credentials=True spawns. Interactive owner sessions keep today's environment. Blocked
+# names cannot be re-admitted by env_passthrough while the context is strict. The 1Password and
+# Bitwarden secret sources spawn their CLIs with scrub_secrets=False, so the strip never reaches them.
+_AGENT_INFRA_CREDENTIAL_ENV = frozenset({
+    "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "BWS_ACCESS_TOKEN", "MORPH_API_KEY",
+    "ARENA_MCP_TOKEN", "LINEAR_API_KEY", "LINEAR_TOKEN", "GITHUB_PAT_TOKEN", "SUDO_PASSWORD",
+})
 
 _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_ORG_ID",
@@ -162,6 +175,66 @@ def _registered_adapter_secret_env() -> frozenset:
     return _registry_adapter_secret_env() | _home_adapter_secret_env()
 
 
+# The profile home of the served child whose env is being built (``served_profile_child_env``). While it is
+# bound, strictness reads that profile's own config.yaml, not the launch profile's (WEA-2773). A ContextVar, so a
+# spawn in another thread or task keeps its own binding.
+_SERVED_CHILD_ENV_HOME = ContextVar("_SERVED_CHILD_ENV_HOME", default=None)
+
+
+@contextlib.contextmanager
+def served_child_env_home(home):
+    """Bind the profile home whose ``strict_child_env`` decides the strictness of a served child's env."""
+    token = _SERVED_CHILD_ENV_HOME.set(Path(home) if home else None)
+    try:
+        yield
+    finally:
+        _SERVED_CHILD_ENV_HOME.reset(token)
+
+
+def _strict_child_env_context() -> bool:
+    """True where the agent-infra credentials are stripped: a dispatcher-owned kanban worker
+    (``HERMES_KANBAN_TASK``; the repo-health bots run as workers), a cron run, a descendant of either
+    (``HERMES_DELEGATED_CHILD_CONTEXT``, which every spawn under a strict context carries, see
+    ``agent.delegation_context.delegated_child_subprocess_env``), or a profile whose config sets
+    ``strict_child_env: true``. The profile is the served target when one is bound
+    (``served_child_env_home``), else the launch profile. Interactive owner sessions match none of these
+    and keep today's environment. The kanban, cron and delegated markers always count. A config read
+    failure counts as not strict, so an unreadable config leaves an owner session as it was."""
+    if (os.environ.get("HERMES_KANBAN_TASK") or "").strip():
+        return True
+    from agent.delegation_context import DELEGATED_CHILD_ENV_MARKER
+    if (os.environ.get(DELEGATED_CHILD_ENV_MARKER) or "").strip():
+        return True
+    try:
+        from gateway.session_context import get_session_env
+
+        if str(get_session_env("HERMES_CRON_SESSION", "") or "").strip():
+            return True
+    except Exception:
+        pass
+    try:
+        from utils import is_truthy_value
+
+        served_home = _SERVED_CHILD_ENV_HOME.get()
+        if served_home is not None:
+            from hermes_cli.config import read_user_config_raw
+
+            config = read_user_config_raw(served_home / "config.yaml")
+        else:
+            from hermes_cli.config import load_config
+
+            config = load_config()
+        return is_truthy_value((config or {}).get("strict_child_env"))
+    except Exception:
+        return False
+
+
+def _is_agent_infra_credential(name: str) -> bool:
+    """``name`` is an agent-infra credential (``_AGENT_INFRA_CREDENTIAL_ENV``) and this context is
+    strict. Checks the name first, so the config is read only for those few names."""
+    return name.upper() in _AGENT_INFRA_CREDENTIAL_ENV and _strict_child_env_context()
+
+
 def _is_provider_env_blocklisted(name: str, _registered: "frozenset | None" = None) -> bool:
     """``name`` is a blocklisted provider/tool credential or adapter secret, matched the way the
     platform's environment resolves names: exact plus case-folded. On Windows the environment
@@ -170,6 +243,8 @@ def _is_provider_env_blocklisted(name: str, _registered: "frozenset | None" = No
     ``_registered`` so the registry is read once per env, not once per key."""
     upper = name.upper()
     if name in _HERMES_PROVIDER_ENV_BLOCKLIST or upper in _HERMES_PROVIDER_ENV_BLOCKLIST:
+        return True
+    if _is_agent_infra_credential(upper):
         return True
     return upper in (_registered_adapter_secret_env() if _registered is None else _registered)
 
@@ -364,9 +439,9 @@ def _plugin_terminal_env_strip_keys() -> frozenset:
 # (claude/codex/gemini). Not provider credentials — no child needs them and they are the
 # highest-value secrets to keep from a compromised dependency. Provider keys = Tier 2.
 _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
-    # GitHub auth
-    "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
-    "GITHUB_APP_INSTALLATION_ID",
+    # GitHub auth. The enterprise and PAT names are GitHub credentials like GH_TOKEN, so they are Tier 1 too.
+    "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_PAT", "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH", "GITHUB_APP_INSTALLATION_ID",
     # Gateway / messaging bot tokens and access control
     "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN",
     "SLACK_SIGNING_SECRET", "GATEWAY_ALLOWED_USERS", "GATEWAY_ALLOW_ALL_USERS",
