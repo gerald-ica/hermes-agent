@@ -22,7 +22,7 @@ from tools.environments.base_output import _pipe_stdin
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.environments.local_env_policy import (  # noqa: F401 — _HERMES_PROVIDER_ENV_BLOCKLIST stays importable from here
     _ALWAYS_STRIP_FOLDED, _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST, _HERMES_PROVIDER_ENV_FORCE_PREFIX,
-    _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
+    _is_agent_infra_credential, _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
     _home_adapter_secret_env, _matches_terminal_first_party_prefix, _plugin_terminal_env_strip_keys,
     _registered_adapter_secret_env, _registry_adapter_secret_env,
     strip_profile_gate_env)
@@ -258,10 +258,10 @@ def _filter_secret_env(
             if not unwrap_force:
                 continue
             key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            if not _is_hermes_internal_secret(key):
+            if not _is_hermes_internal_secret(key) and not _is_agent_infra_credential(key):
                 out[key] = value
             continue
-        if _is_hermes_internal_secret(key) or key.upper() in plugin_strip_folded:
+        if _is_hermes_internal_secret(key) or key.upper() in plugin_strip_folded or _is_agent_infra_credential(key):
             continue
         first_party = _is_terminal_first_party_env(key)
         passthrough = is_env_passthrough(key)
@@ -340,6 +340,7 @@ def _scrub_credentials(env: dict, *, inherit_credentials: bool) -> dict:
     registered = _registry_adapter_secret_env()  # home_secrets already strip above
     for key in list(env):
         if (key.upper() in strip_folded
+                or _is_agent_infra_credential(key)  # strict context only; holds even with inherit_credentials
                 or (not inherit_credentials and _is_provider_env_blocklisted(key, registered))
                 or key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX)
                 or _is_hermes_internal_secret(key)):
